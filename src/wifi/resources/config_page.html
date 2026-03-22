@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>小梁语音助手 - 网络配置</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        .container {
+            background: white;
+            border-radius: 20px;
+            padding: 40px;
+            max-width: 400px;
+            width: 100%;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .header h1 {
+            color: #333;
+            font-size: 24px;
+            margin-bottom: 10px;
+        }
+        .header p {
+            color: #666;
+            font-size: 14px;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: #555;
+            font-weight: 500;
+        }
+        input[type="text"],
+        input[type="password"] {
+            width: 100%;
+            padding: 12px 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            font-size: 16px;
+            transition: border-color 0.3s;
+        }
+        input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        .btn {
+            width: 100%;
+            padding: 15px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 30px rgba(102, 126, 234, 0.4);
+        }
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+        .status {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 10px;
+            text-align: center;
+            display: none;
+        }
+        .status.success {
+            background: #d4edda;
+            color: #155724;
+            display: block;
+        }
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+            display: block;
+        }
+        .status.loading {
+            background: #fff3cd;
+            color: #856404;
+            display: block;
+        }
+        .tips {
+            margin-top: 25px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 10px;
+            font-size: 13px;
+            color: #666;
+        }
+        .tips h3 {
+            font-size: 14px;
+            margin-bottom: 8px;
+            color: #333;
+        }
+        .tips ul {
+            margin-left: 18px;
+        }
+        .tips li {
+            margin-bottom: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎙️ 小梁语音助手</h1>
+            <p>请配置您的WiFi网络</p>
+        </div>
+        
+        <form id="configForm">
+            <div class="form-group">
+                <label for="ssid">WiFi名称</label>
+                <input type="text" id="ssid" name="ssid" placeholder="请输入WiFi名称" required>
+            </div>
+            
+            <div class="form-group">
+                <label for="password">WiFi密码</label>
+                <input type="password" id="password" name="password" placeholder="请输入WiFi密码">
+            </div>
+            
+            <button type="submit" class="btn" id="submitBtn">保存并连接</button>
+        </form>
+        
+        <div id="status" class="status"></div>
+        
+        <div class="tips">
+            <h3>💡 使用提示</h3>
+            <ul>
+                <li>请确保输入正确的WiFi名称和密码</li>
+                <li>设备支持2.4GHz WiFi网络</li>
+                <li>配置成功后设备将自动重启</li>
+                <li>重启后说"你好，小梁"即可唤醒</li>
+            </ul>
+        </div>
+    </div>
+
+    <script>
+        document.getElementById('configForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const ssid = document.getElementById('ssid').value.trim();
+            const password = document.getElementById('password').value;
+            const btn = document.getElementById('submitBtn');
+            const status = document.getElementById('status');
+            
+            if (!ssid) {
+                showStatus('请输入WiFi名称', 'error');
+                return;
+            }
+            
+            btn.disabled = true;
+            showStatus('正在保存配置...', 'loading');
+            
+            try {
+                const response = await fetch('/config', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    },
+                    body: `ssid=${encodeURIComponent(ssid)}&password=${encodeURIComponent(password)}`
+                });
+                
+                const result = await response.json();
+                
+                if (result.status === 'success') {
+                    showStatus('✅ ' + result.message, 'success');
+                } else {
+                    showStatus('❌ ' + result.message, 'error');
+                    btn.disabled = false;
+                }
+            } catch (error) {
+                showStatus('❌ 网络错误，请重试', 'error');
+                btn.disabled = false;
+            }
+        });
+        
+        function showStatus(message, type) {
+            const status = document.getElementById('status');
+            status.textContent = message;
+            status.className = 'status ' + type;
+        }
+    </script>
+</body>
+</html>
