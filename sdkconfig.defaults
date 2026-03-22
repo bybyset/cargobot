@@ -1,0 +1,32 @@
+# Rust often needs a bit of an extra main task stack size compared to C (the default is 3K)
+# You might have to increase this further if you allocate large stack variables in the main task
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# Increase a bit these stack sizes as they are also a bit too small by default
+CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
+CONFIG_FREERTOS_IDLE_TASK_STACKSIZE=4096
+
+# You might have to increase this further if you spawn your own Rust threads 
+# that allocate large stack variables; or better yet - use 
+# `std::thread::Builder::new().stack_size(XXX)` for spawning
+CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=4096
+
+CONFIG_IDF_TARGET="esp32s3"
+
+# 启用 PSRAM
+CONFIG_ESP32S3_SPIRAM_SUPPORT=y
+
+# 关键修正：使用 Octal 模式（你的硬件是 8MB Octal PSRAM）
+CONFIG_SPIRAM_MODE_OCT=y
+
+# PSRAM 大小 8MB
+CONFIG_SPIRAM_SIZE=8388608
+
+# PSRAM 速度
+CONFIG_SPIRAM_SPEED_80M=y
+
+# 启用 PSRAM
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_BOOT_INIT=y
+CONFIG_SPIRAM_USE_CAPS_ALLOC=y
+CONFIG_SPIRAM_IGNORE_NOTFOUND=y
