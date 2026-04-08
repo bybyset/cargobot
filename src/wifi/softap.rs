@@ -1,17 +1,16 @@
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+use std::io::Write;
 
 use esp_idf_svc::http::server::{Configuration as HttpConfig, EspHttpServer};
 use esp_idf_svc::http::Method;
 use esp_idf_svc::wifi::{AccessPointConfiguration, AuthMethod, Configuration, EspWifi};
+use heapless::String as HeaplessString;
 
 use crate::utils::config::{AppConfig, WifiCredentials};
 use crate::wifi::{Result, WifiError};
 use crate::wifi::resources::CONFIG_PAGE_HTML;
-
-use heapless::String as HeaplessString;
-use std::str::FromStr;
 
 pub struct SoftApServer {
     config: AppConfig,
@@ -80,7 +79,7 @@ impl SoftApServer {
             Ok(())
         }).map_err(|e| WifiError::HttpServerError(format!("{:?}", e)))?;
 
-        log::info!("Web服务器已启动，访问 http://192.168.4.1 进行配网");
+        log::info!("Web服务器已启动，访问 http://192.168.71.1 进行配网");
         Ok(server)
     }
 
@@ -148,9 +147,13 @@ pub fn start_softap_mode(
     wifi: &mut EspWifi<'static>,
     config: &AppConfig,
 ) -> Result<()> {
+    use core::str::FromStr;
 
-    let ssid = HeaplessString::from_str(&config.ap_ssid).unwrap();
-    let password = HeaplessString::from_str(&config.ap_password).unwrap();
+    let ssid: HeaplessString<32> = HeaplessString::from_str(&config.ap_ssid)
+        .map_err(|_| WifiError::ConfigError("AP SSID过长".to_string()))?;
+    let password: HeaplessString<64> = HeaplessString::from_str(&config.ap_password)
+        .map_err(|_| WifiError::ConfigError("AP密码过长".to_string()))?;
+
     let ap_config = AccessPointConfiguration {
         ssid,
         password,
@@ -161,10 +164,17 @@ pub fn start_softap_mode(
 
     wifi.set_configuration(&Configuration::AccessPoint(ap_config))?;
     
+    // 启动WiFi
+    wifi.start()?;
+    log::info!("WiFi已启动");
+    
+    // 等待WiFi启动完成
+    thread::sleep(Duration::from_secs(2));
+    
     log::info!("SoftAP模式已启动");
     log::info!("WiFi名称: {}", config.ap_ssid);
     log::info!("WiFi密码: {}", config.ap_password);
-    log::info!("请连接该WiFi后访问 http://192.168.4.1 进行配网");
+    log::info!("请连接该WiFi后访问 http://192.168.71.1 进行配网");
     
     Ok(())
 }

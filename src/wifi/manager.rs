@@ -1,6 +1,6 @@
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::hal::peripherals::Peripherals;
-use esp_idf_svc::nvs::EspDefaultNvsPartition;
+use esp_idf_svc::nvs::{EspNvsPartition, NvsDefault};
 use esp_idf_svc::wifi::{ClientConfiguration, Configuration, EspWifi};
 
 use crate::utils::config::{AppConfig, WifiCredentials};
@@ -18,16 +18,26 @@ pub struct WifiManager {
     state: WifiState,
     config: AppConfig,
     nvs: NvsStorage,
+    nvs_partition: Option<EspNvsPartition<NvsDefault>>,
 }
 
 impl WifiManager {
     pub fn new() -> Result<Self> {
-        let nvs = NvsStorage::new()?;
+        // 先获取NVS分区
+        let nvs_partition = EspNvsPartition::<NvsDefault>::take()
+            .map_err(|e| {
+                log::error!("获取NVS分区失败: {:?}", e);
+                WifiError::from(e)
+            })?;
+        
+        // 使用获取的分区创建NvsStorage
+        let nvs = NvsStorage::new_with_partition(nvs_partition)?;
         
         Ok(Self {
             state: WifiState::Unconfigured,
             config: AppConfig::default(),
             nvs,
+            nvs_partition: None,
         })
     }
 
@@ -67,14 +77,14 @@ impl WifiManager {
         self.state = WifiState::Connecting;
         log::info!("正在连接WiFi: {}", creds.ssid);
 
-        let peripherals = Peripherals::take().unwrap();
         let sys_loop = EspSystemEventLoop::take()?;
-        let nvs = EspDefaultNvsPartition::take()?;
+        let peripherals = Peripherals::take().unwrap();
 
+        // 不使用NVS分区，因为已经被NvsStorage占用
         let mut wifi = EspWifi::new(
             peripherals.modem,
             sys_loop.clone(),
-            Some(nvs),
+            None, // 不使用NVS分区
         )?;
 
         let ssid = HeaplessString::from_str(&creds.ssid).unwrap();
@@ -116,15 +126,22 @@ impl WifiManager {
         self.state = WifiState::Configuring;
         log::info!("启动配网模式...");
 
-        let peripherals = Peripherals::take().unwrap();
+        log::info!("获取系统事件循环...");
         let sys_loop = EspSystemEventLoop::take()?;
-        let nvs = EspDefaultNvsPartition::take()?;
+        log::info!("系统事件循环获取成功");
 
+        log::info!("获取外设...");
+        let peripherals = Peripherals::take().expect("Peripherals already taken");
+        log::info!("外设获取成功");
+
+        log::info!("创建WiFi实例...");
+        // 不使用NVS分区，因为已经被NvsStorage占用
         let mut wifi = EspWifi::new(
             peripherals.modem,
             sys_loop.clone(),
-            Some(nvs),
+            None, // 不使用NVS分区
         )?;
+        log::info!("WiFi实例创建成功");
 
         start_softap_mode(&mut wifi, &self.config)?;
 
@@ -134,9 +151,9 @@ impl WifiManager {
         log::info!("配网服务器已启动，等待用户配置...");
         log::info!("请在手机上连接WiFi: {}", self.config.ap_ssid);
         log::info!("密码: {}", self.config.ap_password);
-        log::info!("然后访问 http://192.168.4.1 进行配网");
+        log::info!("然后访问 http://192.168.71.1 进行配网");
 
-        if let Some(creds) = server.wait_for_credentials(300) {
+        if let Some(creds) = server.wait_for_credentials(600) {
             log::info!("收到WiFi凭证: SSID={}", creds.ssid);
             
             self.nvs.save_wifi_credentials(&creds)?;

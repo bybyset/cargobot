@@ -10,6 +10,31 @@ rust-version = "1.82"
 name = "cargobot"
 harness = false # do not use the built-in cargo test harness -> resolve rust-analyzer errors
 
+[[bin]]
+name = "audio_test"
+path = "src/audio_test.rs"
+harness = false
+
+[[bin]]
+name = "audio_test_basic"
+path = "src/audio_test_basic.rs"
+harness = false
+
+[[bin]]
+name = "oled_test"
+path = "src/oled_test.rs"
+harness = false
+
+[[bin]]
+name = "mic_test"
+path = "src/mic_test.rs"
+harness = false
+
+[[bin]]
+name = "喇叭_test"
+path = "src/喇叭_test.rs"
+harness = false
+
 [profile.release]
 opt-level = "s"
 lto = true
@@ -40,4 +65,4 @@ thiserror = "1.0"
 heapless = "0.9.2"
 
 [build-dependencies]
-embuild = "0.33"
+embuild = { version = "0.33", features = ["espidf"] }

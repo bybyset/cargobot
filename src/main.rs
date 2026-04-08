@@ -4,6 +4,8 @@ use log::info;
 
 mod utils;
 mod wifi;
+mod audio;
+mod oled;
 
 use wifi::manager::WifiManager;
 

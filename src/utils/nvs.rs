@@ -18,6 +18,11 @@ impl NvsStorage {
         Ok(Self { nvs })
     }
 
+    pub fn new_with_partition(nvs_partition: EspNvsPartition<NvsDefault>) -> Result<Self, EspError> {
+        let nvs = EspNvs::new(nvs_partition, NVS_NAMESPACE, true)?;
+        Ok(Self { nvs })
+    }
+
     pub fn save_wifi_credentials(&mut self, creds: &WifiCredentials) -> Result<(), EspError> {
         self.nvs.set_str(KEY_WIFI_SSID, &creds.ssid)?;
         self.nvs.set_str(KEY_WIFI_PASS, &creds.password)?;
