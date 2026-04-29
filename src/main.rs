@@ -6,8 +6,12 @@ mod utils;
 mod wifi;
 mod audio;
 mod oled;
+mod file_storage;
+mod error;
 
 use wifi::manager::WifiManager;
+
+use file_storage::FileSpiffsStorage;
 
 fn main() -> anyhow::Result<()> {
     link_patches();
@@ -40,4 +44,29 @@ fn main() -> anyhow::Result<()> {
     loop {
         std::thread::sleep(std::time::Duration::from_secs(1));
     }
+}
+
+
+// 初始化WiFi，若未配置则进入配网模式
+fn init_wifi() -> anyhow::Result<()> {
+
+    Ok(())
+}
+
+// 初始化音频模块
+fn init_audio() -> anyhow::Result<()> {
+
+    Ok(())
+}
+
+// 初始化OLED显示
+fn init_oled() -> anyhow::Result<()> {
+
+    Ok(())
+}
+
+// 初始化AFE模块
+fn init_afe() -> anyhow::Result<()> {
+
+    Ok(())
 }

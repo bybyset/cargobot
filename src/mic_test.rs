@@ -6,6 +6,8 @@ use esp_idf_svc::hal::i2s::I2sDriver;
 use esp_idf_svc::hal::i2s::I2sRx;
 use esp_idf_svc::hal::delay::Delay;
 use log::{info, error, debug};
+mod file_storage;
+mod error;
 
 const SAMPLE_RATE: u32 = 16000; // 16kHz 采样率
 const BUFFER_SIZE: usize = 1024; // 1KB 缓冲区

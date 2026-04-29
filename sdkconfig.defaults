@@ -1,42 +1,72 @@
 # Rust often needs a bit of an extra main task stack size compared to C (the default is 3K)
 # You might have to increase this further if you allocate large stack variables in the main task
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=32768
 
 # Increase a bit these stack sizes as they are also a bit too small by default
 CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
 CONFIG_FREERTOS_IDLE_TASK_STACKSIZE=4096
 
-# You might have to increase this further if you spawn your own Rust threads 
-# that allocate large stack variables; or better yet - use 
+# You might have to increase this further if you spawn your own Rust threads
+# that allocate large stack variables; or better yet - use
 # `std::thread::Builder::new().stack_size(XXX)` for spawning
-CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=4096
+CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=16384
 
 CONFIG_IDF_TARGET="esp32s3"
 
-# 启用 PSRAM
+# =========================================
+# PSRAM 配置 - ESP32S3 8MB Octal PSRAM
+# =========================================
 CONFIG_ESP32S3_SPIRAM_SUPPORT=y
 
-# 关键修正：使用 Octal 模式（你的硬件是 8MB Octal PSRAM）
+# Octal PSRAM 模式（8位并行接口）
 CONFIG_SPIRAM_MODE_OCT=y
 
 # PSRAM 大小 8MB
 CONFIG_SPIRAM_SIZE=8388608
 
-# PSRAM 速度
+# PSRAM 速度 80MHz
 CONFIG_SPIRAM_SPEED_80M=y
 
-# 启用 PSRAM
+# 初始化 PSRAM
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_BOOT_INIT=y
-CONFIG_SPIRAM_USE_CAPS_ALLOC=y
+
+# =========================================
+# 关键：PSRAM 内存分配策略
+# =========================================
+# 使用 PSRAM 作为扩展堆内存（这是关键！）
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_USE_MEMMAP=n
+CONFIG_SPIRAM_USE_CAPS_ALLOC=n
+
+# 忽略未找到的 PSRAM
 CONFIG_SPIRAM_IGNORE_NOTFOUND=y
 
-# 使用自定义分区表
+# 将 PSRAM 标记为可信内存，让 TLSF 分配器可以使用
+CONFIG_SPIRAM_TRUSTED_RAM=y
+
+# =========================================
+# 系统内存优化
+# =========================================
+# 禁用不必要的内存追踪，减少内存碎片
+CONFIG_ESP_MEMORY_TRACING_NONE=y
+
+# 禁用 OCD (On-Chip Debug) 以节省内存
+CONFIG_ESP_DEBUG_OCDAWARE=n
+
+# =========================================
+# WiFi/BLE 内存优化（如果不需要可以禁用）
+# =========================================
+# CONFIG_ESP32S3_ENABLE_ULTRA_LOW_POWER_COPROCESSOR=y
+
+# =========================================
+# 分区表配置
+# =========================================
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
 CONFIG_PARTITION_TABLE_OFFSET=0x8000
 
-# Flash 大小配置 - 关键！设置为你硬件的 16MB
+# Flash 大小配置
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="16MB"

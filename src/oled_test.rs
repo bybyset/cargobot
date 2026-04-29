@@ -5,6 +5,8 @@ use log::{info, error};
 
 mod oled;
 use oled::driver::OledDisplay;
+mod file_storage;
+mod error;
 
 fn main() -> anyhow::Result<()> {
     link_patches();

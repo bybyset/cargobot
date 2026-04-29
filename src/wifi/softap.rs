@@ -1,7 +1,6 @@
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-use std::io::Write;
 
 use esp_idf_svc::http::server::{Configuration as HttpConfig, EspHttpServer};
 use esp_idf_svc::http::Method;
