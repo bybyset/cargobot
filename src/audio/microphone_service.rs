@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -14,6 +15,8 @@ pub enum MicrophoneError {
     I2SError(esp_idf_svc::sys::EspError),
     PeripheralError,
     NotInitialized,
+    Undefined(String),
+    Stopped,
 }
 
 impl std::fmt::Display for MicrophoneError {
@@ -22,6 +25,8 @@ impl std::fmt::Display for MicrophoneError {
             MicrophoneError::I2SError(e) => write!(f, "I2S错误: {}", e),
             MicrophoneError::PeripheralError => write!(f, "外设错误"),
             MicrophoneError::NotInitialized => write!(f, "未初始化"),
+            MicrophoneError::Undefined(msg) => write!(f, "未定义错误: {}", msg),
+            MicrophoneError::Stopped => write!(f, "已停止"),
         }
     }
 }
@@ -31,6 +36,24 @@ impl std::error::Error for MicrophoneError {}
 impl From<esp_idf_svc::sys::EspError> for MicrophoneError {
     fn from(err: esp_idf_svc::sys::EspError) -> Self {
         MicrophoneError::I2SError(err)
+    }
+}
+
+pub struct MicrophoneServiceConfig {
+    pub channel_capacity: usize,
+    pub read_timeout_ms: u32,
+    pub read_buffer_size: usize,
+    pub microphone_config: MicrophoneConfig,
+}
+
+impl Default for MicrophoneServiceConfig {
+    fn default() -> Self {
+        Self {
+            channel_capacity: 10,
+            read_timeout_ms: 100,
+            read_buffer_size: 1024,
+            microphone_config: MicrophoneConfig::default(),
+        }
     }
 }
 
@@ -56,79 +79,44 @@ impl Default for MicrophoneConfig {
     }
 }
 
-pub struct AudioDataConsumer {
-    receiver: mpsc::Receiver<Vec<u8>>,
-}
-
-impl AudioDataConsumer {
-    pub fn read(&mut self) -> Option<Vec<u8>> {
-        self.receiver.recv().ok()
-    }
-
-    pub fn try_read(&mut self) -> Option<Vec<u8>> {
-        self.receiver.try_recv().ok()
-    }
-
-    pub fn read_timeout(&mut self, timeout: Duration) -> Option<Vec<u8>> {
-        self.receiver.recv_timeout(timeout).ok()
-    }
-}
-
-struct SharedSenders {
-    senders: Mutex<Vec<mpsc::SyncSender<Vec<u8>>>>,
-}
-
-impl SharedSenders {
-    fn new() -> Self {
-        Self {
-            senders: Mutex::new(Vec::new()),
-        }
-    }
-
-    fn add_sender(&self, sender: mpsc::SyncSender<Vec<u8>>) {
-        let mut senders = self.senders.lock().unwrap();
-        senders.push(sender);
-    }
-
-    fn broadcast(&self, data: Vec<u8>) {
-        let senders = self.senders.lock().unwrap();
-        for sender in senders.iter() {
-            // 不会阻塞，立即返回
-            let _ = sender.try_send(data.clone());
-        }
-    }
-}
+type DataConsumer = Box<dyn Fn(Vec<u8>) + Send>;
 
 pub struct MicrophoneService {
-    config: MicrophoneConfig,
+    service_config: Arc<MicrophoneServiceConfig>,
     stop_signal: Arc<AtomicBool>,
-    i2s: Option<I2sDriver<'static, I2sRx>>,
     worker_thread: Option<thread::JoinHandle<()>>,
-    shared_senders: Arc<SharedSenders>,
-    channel_capacity: usize,
+    data_consumers: Arc<Mutex<Vec<DataConsumer>>>,
+    // i2s: Option<I2sDriver<'static, I2sRx>>,
 }
 
 impl MicrophoneService {
-    pub fn new(config: MicrophoneConfig) -> Result<Self, MicrophoneError> {
+    pub fn new(service_config: MicrophoneServiceConfig) -> Result<Self, MicrophoneError> {
         info!("========================================");
         info!("🎤 麦克风程序启动...");
         info!("========================================");
-        info!("麦克风配置: 采样率={}Hz, 缓冲区大小={}, 超时={}ms", 
-              config.sample_rate, config.buffer_size, config.read_timeout_ms);
-        info!("I2S引脚配置: SCK={}, SD={}, WS={}", 
-              config.sck_pin, config.sd_pin, config.ws_pin);
+        let config = &service_config.microphone_config;
+        info!(
+            "麦克风配置: 采样率={}Hz, 缓冲区大小={}, 超时={}ms",
+            config.sample_rate, config.buffer_size, config.read_timeout_ms
+        );
+        info!(
+            "I2S引脚配置: SCK={}, SD={}, WS={}",
+            config.sck_pin, config.sd_pin, config.ws_pin
+        );
 
-        let peripherals = Peripherals::take()
-            .map_err(|e| {
-                error!("❌ 获取外设失败: {:?}", e);
-                MicrophoneError::PeripheralError
-            })?;
-        
+        let peripherals = Peripherals::take().map_err(|e| {
+            error!("❌ 获取外设失败: {:?}", e);
+            MicrophoneError::PeripheralError
+        })?;
+
         // 配置 I2S 音频输入（麦克风）- 标准模式
         info!("初始化 I2S 音频输入...");
         let i2s_config = StdConfig::philips(config.sample_rate, DataBitWidth::Bits16);
-        info!("I2S配置: 标准模式, 采样率={}Hz, 位宽=16位", config.sample_rate);
-        
+        info!(
+            "I2S配置: 标准模式, 采样率={}Hz, 位宽=16位",
+            config.sample_rate
+        );
+
         info!("正在创建 I2sDriver 实例...");
         let i2s = I2sDriver::<I2sRx>::new_std_rx(
             peripherals.i2s0,
@@ -137,46 +125,48 @@ impl MicrophoneService {
             peripherals.pins.gpio6,                // SD (Serial Data)
             None::<esp_idf_svc::hal::gpio::Gpio0>, // MCLK（不使用）
             peripherals.pins.gpio4,                // WS (Word Select)
-        ).map_err(|e| {
+        )
+        .map_err(|e| {
             error!("❌ 创建 I2sDriver 失败: {:?}", e);
             MicrophoneError::from(e)
         })?;
-
         info!("✅ I2S 音频输入初始化成功");
 
-        let channel_capacity = 10; // 每个通道最多缓存10个音频包，减少内存占用
+        let channel_capacity = service_config.channel_capacity;
         info!("创建共享发送器，通道容量: {}", channel_capacity);
 
+        // 开启worker线程
+        let data_consumers = Arc::new(Mutex::new(Vec::new()));
+        let data_consumers_clone = data_consumers.clone();
+        let stop_signal = Arc::new(AtomicBool::new(false));
+        let stop_signal_clone = stop_signal.clone();
+        let service_config = Arc::new(service_config);
+        let service_config_clone = service_config.clone();
+        let worker_thread = thread::spawn(move || {
+            Self::run_work(
+                stop_signal_clone,
+                service_config_clone,
+                i2s,
+                data_consumers_clone,
+            )
+        });
+
         Ok(Self {
-            i2s: Some(i2s),
-            config,
-            worker_thread: None,
-            stop_signal: Arc::new(AtomicBool::new(false)),
-            shared_senders: Arc::new(SharedSenders::new()),
-            channel_capacity,
+            service_config,
+            worker_thread: Some(worker_thread),
+            stop_signal,
+            data_consumers,
         })
     }
 
-    pub fn start(&mut self) -> Result<(), MicrophoneError> {
-        info!("开始启动麦克风服务...");
-        let mut i2s = self.i2s.take().ok_or_else(|| {
-            error!("❌ 麦克风服务未初始化");
-            MicrophoneError::NotInitialized
-        })?;
-        
-        info!("正在启用 I2S 接收通道...");
-        match i2s.rx_enable() {
-            Ok(()) => info!("✅ I2S 接收通道启用成功"),
-            Err(e) => {
-                error!("❌ 启用 I2S 接收通道失败: {:?}", e);
-                self.i2s = Some(i2s); // 保存回实例
-                return Err(e.into());
-            }
+    pub fn is_stoped(&self) -> bool {
+        self.stop_signal.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn check_stoped(&self) -> Result<(), MicrophoneError> {
+        if self.is_stoped() {
+            return Err(MicrophoneError::Stopped);
         }
-        
-        info!("正在启动音频处理线程...");
-        self.start_processing(i2s)?;
-        info!("✅ 麦克风服务启动成功");
         Ok(())
     }
 
@@ -184,7 +174,7 @@ impl MicrophoneService {
         info!("开始停止麦克风服务...");
         self.stop_signal
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        
+
         if let Some(thread) = self.worker_thread.take() {
             info!("等待音频处理线程退出...");
             if let Err(e) = thread.join() {
@@ -193,97 +183,169 @@ impl MicrophoneService {
                 info!("✅ 音频处理线程已退出");
             }
         }
-        
+
         info!("✅ 麦克风服务已停止");
         Ok(())
     }
 
-    pub fn gen_audio_consumer(&mut self) -> Result<AudioDataConsumer, MicrophoneError> {
-        self.gen_audio_consumer_with_capacity(self.channel_capacity)
+    fn register_data_consumer(&self, consumer: DataConsumer) -> Result<usize, MicrophoneError> {
+        let mut audio_consumers = self
+            .data_consumers
+            .lock()
+            .map_err(|e| MicrophoneError::Undefined(e.to_string()))?;
+        audio_consumers.push(consumer);
+        Ok(audio_consumers.len() - 1)
     }
-    // 创建一个音频数据的消费者
-    pub fn gen_audio_consumer_with_capacity(
-        &mut self,
-        channel_capacity: usize,
-    ) -> Result<AudioDataConsumer, MicrophoneError> {
-        info!("创建音频数据消费者，通道容量: {}", channel_capacity);
-        let (sender, receiver) = mpsc::sync_channel(channel_capacity);
-        self.shared_senders.add_sender(sender);
-        info!("✅ 音频数据消费者创建成功");
-        Ok(AudioDataConsumer { receiver })
+    fn unregister_data_consumer(&self, index: usize) -> Result<DataConsumer, MicrophoneError> {
+        do_unregister_data_consumer(self.data_consumers.clone(), index)
     }
 
-    fn start_processing(
-        &mut self,
+    pub fn open_reader(&self) -> Result<MicrophoneReader, MicrophoneError> {
+        self.check_stoped()?;
+        info!("开始打开麦克风并注册读取器...");
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        let data_consumer = Box::new(move |bytes: Vec<u8>| {
+            if let Err(e) = tx.send(bytes) {
+                eprintln!("[麦克风] 发送音频数据失败: {}", e);
+            }
+        });
+        let consumer_index = self.register_data_consumer(data_consumer)?;
+        let data_consumers_clone = self.data_consumers.clone();
+        let on_close = Box::new(move || {
+            let _ = do_unregister_data_consumer(data_consumers_clone, consumer_index);
+        });
+        let reader = MicrophoneReader::new(on_close, rx);
+        Ok(reader)
+    }
+
+    fn run_work(
+        stop_signal: Arc<AtomicBool>,
+        service_config: Arc<MicrophoneServiceConfig>,
         mut i2s: I2sDriver<'static, I2sRx>,
-    ) -> Result<(), MicrophoneError> {
+        data_consumers: Arc<Mutex<Vec<DataConsumer>>>,
+    ) {
         // 开启线程，持续读取音频数据
         info!("正在启动音频数据处理线程...");
-        let mut buffer = vec![0u8; self.config.buffer_size * 2];
-        let read_timeout_ms = self.config.read_timeout_ms;
-        let stop_signal = self.stop_signal.clone();
-        let shared_senders = self.shared_senders.clone();
-        let buffer_size = self.config.buffer_size;
-        
-        info!("音频处理线程配置: 缓冲区大小={}, 读取超时={}ms", buffer_size, read_timeout_ms);
-        
-        let thread = thread::spawn(move || {
-            info!("音频数据处理线程已启动");
-            let mut read_count = 0;
-            let mut broadcast_count = 0;
-            
-            loop {
-                if stop_signal.load(std::sync::atomic::Ordering::Relaxed) {
-                    info!("音频数据处理线程收到停止信号，退出循环");
-                    break;
-                }
-                
-                let read_result = i2s.read(buffer.as_mut(), read_timeout_ms);
-                match read_result {
-                    Ok(count) if count > 0 => {
-                        read_count += 1;
-                        if read_count % 1000 == 0 {
-                            info!("已读取 {} 次音频数据", read_count);
-                        }
-                        // 生产者发送音频数据
-                        let read_bytes = Vec::from(&buffer[..count]);
-                        shared_senders.broadcast(read_bytes);
-                        broadcast_count += 1;
-                        if broadcast_count % 1000 == 0 {
-                            info!("已广播 {} 次音频数据", broadcast_count);
-                        }
-                    }
-                    Ok(_) => {
-                        // 暂停处理
-                        thread::sleep(Duration::from_millis(100));
-                    }
-                    Err(e) => {
-                        // 判断是否超时异常, 否则打印错误，并跳出循环
-                        if e.code() != esp_idf_svc::sys::ESP_ERR_TIMEOUT {
-                            error!("❌ 读取音频数据失败: {:?}, 错误码: {}", e, e.code());
-                            break;
-                        }
-                    }
-                }
+        let mut buffer = vec![0u8; service_config.read_buffer_size];
+        let read_timeout_ms = service_config.read_timeout_ms;
+        info!(
+            "音频处理线程配置: 缓冲区大小={}, 读取超时={}ms",
+            service_config.read_buffer_size, read_timeout_ms
+        );
+        info!("音频数据处理线程已启动");
+
+        loop {
+            if stop_signal.load(std::sync::atomic::Ordering::Relaxed) {
+                info!("音频数据处理线程收到停止信号，退出循环");
+                break;
             }
 
-            info!("音频数据处理线程统计: 读取 {} 次, 广播 {} 次", read_count, broadcast_count);
-            
-            // 关闭I2S接收通道
-            info!("正在禁用 I2S 接收通道...");
-            match i2s.rx_disable() {
-                Ok(()) => info!("✅ I2S 接收通道禁用成功"),
+            let read_result = i2s.read(buffer.as_mut(), read_timeout_ms);
+            match read_result {
+                Ok(count) if count > 0 => {
+                    let audio_consumers = data_consumers.lock().unwrap();
+                    for consumer in audio_consumers.iter() {
+                        consumer(Vec::from(&buffer[..count]));
+                    }
+                }
+                Ok(_) => {
+                    // 暂停处理
+                    thread::sleep(Duration::from_millis(20));
+                }
                 Err(e) => {
-                    error!("❌ 禁用 I2S 接收通道失败: {:?}, 错误码: {}", e, e.code());
-                    error!("I2S通道状态: 可能未启用或已被禁用");
+                    // 判断是否超时异常, 否则打印错误，并跳出循环
+                    if e.code() != esp_idf_svc::sys::ESP_ERR_TIMEOUT {
+                        error!("❌ 读取音频数据失败: {:?}, 错误码: {}", e, e.code());
+                        break;
+                    }
                 }
             }
-            
-            info!("音频数据处理线程已退出");
-        });
-        
-        self.worker_thread = Some(thread);
-        info!("✅ 音频数据处理线程启动成功");
-        Ok(())
+        }
+        // 关闭I2S接收通道
+        info!("正在禁用 I2S 接收通道...");
+        let _ = i2s.rx_disable();
+        stop_signal.store(true, std::sync::atomic::Ordering::Relaxed);
+        info!("音频数据处理线程已退出");
+    }
+}
+
+impl Drop for MicrophoneService {
+    fn drop(&mut self) {
+        let _ = self.stop();
+    }
+}
+
+fn do_unregister_data_consumer(
+    audio_consumers: Arc<Mutex<Vec<DataConsumer>>>,
+    index: usize,
+) -> Result<DataConsumer, MicrophoneError> {
+    let mut audio_consumers = audio_consumers
+        .lock()
+        .map_err(|e| MicrophoneError::Undefined(e.to_string()))?;
+    let consumer = audio_consumers.remove(index);
+    Ok(consumer)
+}
+
+const EMPTY_BUFFER: Vec<u8> = Vec::new();
+
+pub struct MicrophoneReader {
+    on_close: Option<Box<dyn FnOnce() + Send>>,
+    rx: mpsc::Receiver<Vec<u8>>,
+    current_buffer: Vec<u8>,
+    cur_index: usize,
+    timeout: std::time::Duration,
+}
+
+impl MicrophoneReader {
+    pub fn new(on_close: Box<dyn FnOnce() + Send>, rx: mpsc::Receiver<Vec<u8>>) -> Self {
+        Self {
+            on_close: Some(on_close),
+            rx,
+            current_buffer: EMPTY_BUFFER,
+            cur_index: 0,
+            timeout: std::time::Duration::from_millis(20),
+        }
+    }
+
+    pub fn set_timeout(&mut self, timeout: std::time::Duration) {
+        self.timeout = timeout;
+    }
+
+    pub fn close(&mut self) {
+        let on_close = self.on_close.take();
+        on_close.map(|f| f());
+        self.current_buffer = EMPTY_BUFFER;
+        self.cur_index = 0;
+    }
+}
+
+impl Read for MicrophoneReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let buf_len = buf.len();
+        let mut read_len = 0;
+        for i in 0..buf_len {
+            if self.cur_index >= self.current_buffer.len() {
+                // 缓冲区空了，等待新数据
+                if let Ok(new_buffer) = self.rx.recv_timeout(self.timeout) {
+                    self.current_buffer = new_buffer;
+                } else {
+                    self.current_buffer = EMPTY_BUFFER;
+                }
+                self.cur_index = 0;
+            }
+            if self.cur_index >= self.current_buffer.len() {
+                break;
+            }
+            buf[i] = self.current_buffer[self.cur_index];
+            self.cur_index += 1;
+            read_len += 1;
+        }
+        Ok(read_len)
+    }
+}
+
+impl Drop for MicrophoneReader {
+    fn drop(&mut self) {
+        self.close();
     }
 }

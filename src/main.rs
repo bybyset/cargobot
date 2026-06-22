@@ -1,17 +1,20 @@
-use esp_idf_svc::sys::link_patches;
+use std::{sync::Arc, thread, time::Duration};
+
 use esp_idf_svc::log::EspLogger;
+use esp_idf_svc::sys::link_patches;
 use log::info;
 
+mod audio;
+mod error;
+mod file_storage;
+mod oled;
 mod utils;
 mod wifi;
-mod audio;
-mod oled;
-mod file_storage;
-mod error;
 
-use wifi::manager::WifiManager;
-
-use file_storage::FileSpiffsStorage;
+use crate::audio::{
+    rtvoice::doubao::{config::RuntimeConfig, RtService},
+    MicrophoneService, MicrophoneServiceConfig, SpeakerServiceConfig, WakeWordService,
+};
 
 fn main() -> anyhow::Result<()> {
     link_patches();
@@ -21,52 +24,92 @@ fn main() -> anyhow::Result<()> {
     info!("🎙️ 小梁语音助手启动中...");
     info!("========================================");
 
-    let mut wifi_manager = WifiManager::new()?;
-    wifi_manager.init()?;
+    // 引导设置WiFi
+    let wifi_manager = wifi::wait_for_wifi_connection()?;
 
-    if wifi_manager.is_configured() {
-        info!("✅ 已配置WiFi，尝试连接...");
-    } else {
-        info!("⚠️ 未配置WiFi，将进入配网模式");
-        info!("📱 请按以下步骤操作：");
-        info!("   1. 用手机连接WiFi: XiaoLiang-Setup");
-        info!("   2. 密码: 12345678");
-        info!("   3. 浏览器访问: http://192.168.4.1");
-        info!("   4. 输入您的家庭WiFi信息");
-    }
+    // 启动音响服务
+    let speaker_service = audio::SpeakerService::new(SpeakerServiceConfig::default())?;
+    let speaker_service = Arc::new(speaker_service);
 
-    if let Err(e) = wifi_manager.ensure_connected() {
-        log::error!("WiFi连接失败: {}", e);
-    }
+    // 启动麦克风服务
+    let microphone_service = audio::MicrophoneService::new(MicrophoneServiceConfig::default())?;
+    let microphone_service = Arc::new(microphone_service);
+    let microphone_service_clone = microphone_service.clone();
+    // 开启豆包语音服务
+    let doubao_config = RuntimeConfig::new_from_keys(
+        String::from("doubao_app_id"),
+        String::from("doubao_app_secret"),
+        String::from("doubao_app".to_string()),
+    );
+    let mut rt_service = audio::rtvoice::doubao::RtService::new(
+        speaker_service,
+        microphone_service_clone,
+        doubao_config,
+    );
+
+    // 监听唤醒词，若检测到则开启豆包语音服务
+    let wake_service = start_wake_word_service(microphone_service, rt_service)?;
 
     info!("系统初始化完成，进入主循环...");
 
-    loop {
-        std::thread::sleep(std::time::Duration::from_secs(1));
+    thread::park();
+    info!("系统退出!");
+    Ok(())
+}
+
+fn start_wake_word_service(
+    microphone_service: Arc<MicrophoneService>,
+    mut rt_service: RtService,
+) -> anyhow::Result<WakeWordService> {
+    // 挂载 SPIFFS 分区
+    file_storage::mount_spiffs().map_err(|e| anyhow::anyhow!("挂载 SPIFFS 失败"))?;
+    // 列出 SPIFFS storage 目录中的文件
+    info!("========================================");
+    info!("📁 SPIFFS /storage 目录内容:");
+    info!("========================================");
+    match std::fs::read_dir("/storage") {
+        Ok(entries) => {
+            let mut found_model = false;
+            for entry in entries {
+                if let Ok(entry) = entry {
+                    let path = entry.path();
+                    if path.is_file() {
+                        let filename = path.file_name().unwrap_or_default().to_string_lossy();
+                        info!("📄 {}", filename);
+                        if filename.contains("nihaoxiaoliang") {
+                            found_model = true;
+                        }
+                    }
+                }
+            }
+            if !found_model {
+                info!("⚠️ 未找到唤醒词模型文件: nihaoxiaoliang.rpw");
+                info!("💡 请先将模型文件烧录到 SPIFFS 分区");
+            }
+        }
+        Err(e) => {
+            info!("❌ 无法读取 /storage 目录: {:?}", e);
+            info!("💡 请确保 SPIFFS 分区已正确挂载");
+        }
     }
-}
 
-
-// 初始化WiFi，若未配置则进入配网模式
-fn init_wifi() -> anyhow::Result<()> {
-
-    Ok(())
-}
-
-// 初始化音频模块
-fn init_audio() -> anyhow::Result<()> {
-
-    Ok(())
-}
-
-// 初始化OLED显示
-fn init_oled() -> anyhow::Result<()> {
-
-    Ok(())
-}
-
-// 初始化AFE模块
-fn init_afe() -> anyhow::Result<()> {
-
-    Ok(())
+    // 启动唤醒词服务
+    let wake_word_config = audio::WakeWordConfig::default();
+    let microphone_service_clone = microphone_service.clone();
+    let wake_service = audio::WakeWordService::new(
+        wake_word_config,
+        microphone_service_clone,
+        move |wake_word| {
+            println!("唤醒词: {}", wake_word);
+            let start_result = rt_service.start();
+            if let Err(e) = start_result {
+                println!("start_result: {:?}", e);
+            } else {
+                println!("start rtvoice success");
+                thread::sleep(Duration::from_secs(300));
+                rt_service.stop();
+            }
+        },
+    )?;
+    Ok(wake_service)
 }

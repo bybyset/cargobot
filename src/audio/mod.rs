@@ -5,7 +5,6 @@ pub mod microphone_service;
 pub mod speaker_service;
 
 pub use self::simple_buzzer::*;
-pub use self::rtvoice::*;
 pub use self::wakeword::*;
 pub use self::microphone_service::*;
 pub use self::speaker_service::*;
