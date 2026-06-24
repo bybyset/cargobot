@@ -168,8 +168,6 @@ impl WakeWordService {
 
         info!("唤醒词检测线程配置: 每帧字节数={}", bytes_per_sample);
 
-        info!("唤醒词检测线程已启动");
-
         let mut wake_word_result = None;
         let mut detections = 0;
         loop {
@@ -178,45 +176,58 @@ impl WakeWordService {
 
             match current_state {
                 WakeWordState::Started => {
-                    info!("唤醒词检测线程已启动");
+                    info!("唤醒词检测线程已启动, 进入监听状态");
+                    state.store(WakeWordState::WaitWaking as u8, Ordering::Relaxed);
                 }
                 WakeWordState::WaitWaking => {
                     info!("唤醒词检测线程正在监听唤醒词");
-                    let mut audio_reader = microphone_service.open_reader().unwrap();
-                    // buffer_size = bytes_per_sample
-                    let mut buffer = vec![0u8; bytes_per_sample];
-                    let mut frame = vec![0u8; bytes_per_sample];
-                    let mut data_size: usize = 0;
+                    let audio_reader_result = microphone_service.open_reader();
+                    match audio_reader_result {
+                        Ok(mut audio_reader) => {
+                            // buffer_size = bytes_per_sample
+                            let mut buffer = vec![0u8; bytes_per_sample];
+                            let mut frame = vec![0u8; bytes_per_sample];
+                            let mut data_size: usize = 0;
 
-                    'outer: loop {
-                        // 校验是否stop
-                        if state.load(Ordering::Relaxed) == WakeWordState::Stopped as u8 {
-                            break;
-                        }
-
-                        let mut read_bytes = audio_reader.read(&mut buffer).unwrap();
-                        while read_bytes > 0 {
-                            let copy_bytes = read_bytes.min(bytes_per_sample - data_size);
-                            frame[data_size..].copy_from_slice(&buffer[..copy_bytes]);
-                            data_size += copy_bytes;
-                            read_bytes -= copy_bytes;
-                            if data_size == bytes_per_sample {
-                                let result = rustpotter.process_bytes(&frame);
-                                if let Some(detection) = result {
-                                    detections += 1;
-                                    info!(
-                                        "🎉 检测到唤醒词: {} (第 {} 次)",
-                                        detection.name, detections
-                                    );
-                                    // 跳出循环，进入Working状态
-                                    state.store(WakeWordState::Working as u8, Ordering::Relaxed);
-                                    wake_word_result = Some(detection);
-                                    break 'outer; // 跳出循环，进入Working状态
+                            'outer: loop {
+                                // 校验是否stop
+                                if state.load(Ordering::Relaxed) == WakeWordState::Stopped as u8 {
+                                    break;
                                 }
-                                data_size = 0;
+
+                                let mut read_bytes = audio_reader.read(&mut buffer).unwrap();
+                                while read_bytes > 0 {
+                                    let copy_bytes = read_bytes.min(bytes_per_sample - data_size);
+                                    frame[data_size..].copy_from_slice(&buffer[..copy_bytes]);
+                                    data_size += copy_bytes;
+                                    read_bytes -= copy_bytes;
+                                    if data_size == bytes_per_sample {
+                                        let result = rustpotter.process_bytes(&frame);
+                                        if let Some(detection) = result {
+                                            detections += 1;
+                                            info!(
+                                        "🎉 检测到唤醒词: {} (第 {} 次, 分数={}), 进入工作状态",
+                                        detection.name, detections, detection.score
+                                    );
+                                            // 跳出循环，进入Working状态
+                                            state.store(
+                                                WakeWordState::Working as u8,
+                                                Ordering::Relaxed,
+                                            );
+                                            wake_word_result = Some(detection);
+                                            break 'outer; // 跳出循环，进入Working状态
+                                        }
+                                        data_size = 0;
+                                    }
+                                }
                             }
                         }
-                    }
+                        Err(e) => {
+                            error!("❌ 打开麦克风读取器失败: {:?}", e);
+                            thread::sleep(Duration::from_secs(10));
+                            continue;
+                        }
+                    };
                 }
                 WakeWordState::Working => {
                     info!("唤醒词检测线程正在工作");
@@ -224,6 +235,7 @@ impl WakeWordService {
                         on_detect(&detection.name);
                     }
                     //进入WaitWaking状态
+                    info!("工作完成, 进入监听状态");
                     state.store(WakeWordState::WaitWaking as u8, Ordering::Relaxed);
                 }
                 WakeWordState::Stopped => {

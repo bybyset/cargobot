@@ -1,7 +1,7 @@
 use std::{sync::Arc, thread, time::Duration};
 
-use esp_idf_svc::log::EspLogger;
 use esp_idf_svc::sys::link_patches;
+use esp_idf_svc::{hal::peripherals::Peripherals, log::EspLogger};
 use log::info;
 
 mod audio;
@@ -23,23 +23,39 @@ fn main() -> anyhow::Result<()> {
     info!("========================================");
     info!("🎙️ 小梁语音助手启动中...");
     info!("========================================");
+    let peripherals =
+        Peripherals::take().map_err(|e| anyhow::anyhow!("❌ 获取外设失败: {:?}", e))?;
 
     // 引导设置WiFi
-    let wifi_manager = wifi::wait_for_wifi_connection()?;
+    let wifi_manager = wifi::wait_for_wifi_connection(peripherals.modem)?;
 
     // 启动音响服务
-    let speaker_service = audio::SpeakerService::new(SpeakerServiceConfig::default())?;
+    let speaker_service = audio::SpeakerService::new(
+        SpeakerServiceConfig::default(),
+        peripherals.i2s1,
+        peripherals.pins.gpio15,
+        peripherals.pins.gpio7,
+        None::<esp_idf_svc::hal::gpio::Gpio0>,
+        peripherals.pins.gpio16,
+    )?;
     let speaker_service = Arc::new(speaker_service);
-
+    
     // 启动麦克风服务
-    let microphone_service = audio::MicrophoneService::new(MicrophoneServiceConfig::default())?;
+    let microphone_service = audio::MicrophoneService::new(
+        MicrophoneServiceConfig::default(),
+        peripherals.i2s0,
+        peripherals.pins.gpio5,
+        peripherals.pins.gpio6,
+        None::<esp_idf_svc::hal::gpio::Gpio0>,
+        peripherals.pins.gpio4,
+    )?;
     let microphone_service = Arc::new(microphone_service);
     let microphone_service_clone = microphone_service.clone();
     // 开启豆包语音服务
     let doubao_config = RuntimeConfig::new_from_keys(
-        String::from("doubao_app_id"),
-        String::from("doubao_app_secret"),
-        String::from("doubao_app".to_string()),
+        String::from("xx"),
+        String::from("xx"),
+        String::from("xx"),
     );
     let mut rt_service = audio::rtvoice::doubao::RtService::new(
         speaker_service,

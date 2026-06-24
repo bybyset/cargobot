@@ -5,16 +5,14 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use esp_idf_svc::hal::gpio::{InputPin, OutputPin};
 use esp_idf_svc::hal::i2s::config::{DataBitWidth, StdConfig};
-use esp_idf_svc::hal::i2s::{I2sDriver, I2sRx};
-use esp_idf_svc::hal::peripherals::Peripherals;
+use esp_idf_svc::hal::i2s::{I2s, I2sDriver, I2sRx};
 use log::{error, info};
 
 #[derive(Debug)]
 pub enum MicrophoneError {
-    I2SError(esp_idf_svc::sys::EspError),
-    PeripheralError,
-    NotInitialized,
+    EspError(esp_idf_svc::sys::EspError),
     Undefined(String),
     Stopped,
 }
@@ -22,9 +20,7 @@ pub enum MicrophoneError {
 impl std::fmt::Display for MicrophoneError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            MicrophoneError::I2SError(e) => write!(f, "I2S错误: {}", e),
-            MicrophoneError::PeripheralError => write!(f, "外设错误"),
-            MicrophoneError::NotInitialized => write!(f, "未初始化"),
+            MicrophoneError::EspError(e) => write!(f, "I2S错误: {}", e),
             MicrophoneError::Undefined(msg) => write!(f, "未定义错误: {}", msg),
             MicrophoneError::Stopped => write!(f, "已停止"),
         }
@@ -35,7 +31,7 @@ impl std::error::Error for MicrophoneError {}
 
 impl From<esp_idf_svc::sys::EspError> for MicrophoneError {
     fn from(err: esp_idf_svc::sys::EspError) -> Self {
-        MicrophoneError::I2SError(err)
+        MicrophoneError::EspError(err)
     }
 }
 
@@ -61,9 +57,6 @@ pub struct MicrophoneConfig {
     pub sample_rate: u32,
     pub buffer_size: usize,
     pub read_timeout_ms: u32,
-    pub sck_pin: i32,
-    pub sd_pin: i32,
-    pub ws_pin: i32,
 }
 
 impl Default for MicrophoneConfig {
@@ -72,9 +65,6 @@ impl Default for MicrophoneConfig {
             sample_rate: 16000,
             buffer_size: 32,
             read_timeout_ms: 100,
-            sck_pin: 5,
-            sd_pin: 6,
-            ws_pin: 4,
         }
     }
 }
@@ -90,7 +80,14 @@ pub struct MicrophoneService {
 }
 
 impl MicrophoneService {
-    pub fn new(service_config: MicrophoneServiceConfig) -> Result<Self, MicrophoneError> {
+    pub fn new<I2S: I2s + 'static>(
+        service_config: MicrophoneServiceConfig,
+        i2s: I2S,
+        bclk: impl InputPin + OutputPin + 'static,
+        din: impl InputPin + 'static,
+        mclk: Option<impl InputPin + OutputPin + 'static>,
+        ws: impl InputPin + OutputPin + 'static,
+    ) -> Result<Self, MicrophoneError> {
         info!("========================================");
         info!("🎤 麦克风程序启动...");
         info!("========================================");
@@ -99,15 +96,6 @@ impl MicrophoneService {
             "麦克风配置: 采样率={}Hz, 缓冲区大小={}, 超时={}ms",
             config.sample_rate, config.buffer_size, config.read_timeout_ms
         );
-        info!(
-            "I2S引脚配置: SCK={}, SD={}, WS={}",
-            config.sck_pin, config.sd_pin, config.ws_pin
-        );
-
-        let peripherals = Peripherals::take().map_err(|e| {
-            error!("❌ 获取外设失败: {:?}", e);
-            MicrophoneError::PeripheralError
-        })?;
 
         // 配置 I2S 音频输入（麦克风）- 标准模式
         info!("初始化 I2S 音频输入...");
@@ -118,19 +106,22 @@ impl MicrophoneService {
         );
 
         info!("正在创建 I2sDriver 实例...");
-        let i2s = I2sDriver::<I2sRx>::new_std_rx(
-            peripherals.i2s0,
+        let mut i2s = I2sDriver::<I2sRx>::new_std_rx(
+            i2s,
             &i2s_config,
-            peripherals.pins.gpio5,                // SCK (Serial Clock)
-            peripherals.pins.gpio6,                // SD (Serial Data)
-            None::<esp_idf_svc::hal::gpio::Gpio0>, // MCLK（不使用）
-            peripherals.pins.gpio4,                // WS (Word Select)
+            bclk, // SCK (Serial Clock)
+            din,  // SD (Serial Data)
+            mclk,
+            ws, // WS (Word Select)
         )
         .map_err(|e| {
             error!("❌ 创建 I2sDriver 失败: {:?}", e);
             MicrophoneError::from(e)
         })?;
         info!("✅ I2S 音频输入初始化成功");
+
+        i2s.rx_enable().map_err(|e| MicrophoneError::from(e))?;
+        info!("✅ I2S 音频输入已启用");
 
         let channel_capacity = service_config.channel_capacity;
         info!("创建共享发送器，通道容量: {}", channel_capacity);

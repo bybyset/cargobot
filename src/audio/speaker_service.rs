@@ -4,9 +4,11 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+use esp_idf_svc::hal::gpio::InputPin;
+use esp_idf_svc::hal::gpio::OutputPin;
 use esp_idf_svc::hal::i2s::config::{DataBitWidth, StdConfig};
+use esp_idf_svc::hal::i2s::I2s;
 use esp_idf_svc::hal::i2s::{I2sDriver, I2sTx};
-use esp_idf_svc::hal::peripherals::Peripherals;
 use log::{error, info};
 
 #[derive(Clone, Copy)]
@@ -28,19 +30,11 @@ impl Default for SpeakerServiceConfig {
 #[derive(Clone, Copy)]
 pub struct SpeakerConfig {
     pub sample_rate: u32,
-    pub bclk_pin: i32,
-    pub din_pin: i32,
-    pub ws_pin: i32,
 }
 
 impl Default for SpeakerConfig {
     fn default() -> Self {
-        Self {
-            sample_rate: 16000,
-            bclk_pin: 15,
-            din_pin: 7,
-            ws_pin: 16,
-        }
+        Self { sample_rate: 16000 }
     }
 }
 
@@ -60,7 +54,14 @@ pub struct SpeakerService {
 }
 
 impl SpeakerService {
-    pub fn new(service_config: SpeakerServiceConfig) -> Result<Self, SpeakerError> {
+    pub fn new<I2S: I2s + 'static>(
+        service_config: SpeakerServiceConfig,
+        i2s: I2S,
+        bclk: impl InputPin + OutputPin + 'static,
+        dout: impl OutputPin + 'static,
+        mclk: Option<impl InputPin + OutputPin + 'static>,
+        ws: impl InputPin + OutputPin + 'static,
+    ) -> Result<Self, SpeakerError> {
         info!("========================================");
         info!("🔊 音响程序启动...");
         info!("========================================");
@@ -70,17 +71,6 @@ impl SpeakerService {
             service_config.buffer_size,
             service_config.queue_capacity
         );
-        info!(
-            "I2S引脚配置: BCLK={}, DIN={}, WS={}",
-            service_config.config.bclk_pin,
-            service_config.config.din_pin,
-            service_config.config.ws_pin
-        );
-
-        let peripherals = Peripherals::take().map_err(|e| {
-            error!("❌ 获取外设失败: {:?}", e);
-            SpeakerError::PeripheralError
-        })?;
 
         let config = service_config.config;
 
@@ -93,25 +83,27 @@ impl SpeakerService {
 
         info!("正在创建 I2sDriver 实例...");
         let mut i2s = I2sDriver::<I2sTx>::new_std_tx(
-            peripherals.i2s1,
+            i2s,
             &i2s_config,
-            peripherals.pins.gpio15,               // BCLK (Bit Clock)
-            peripherals.pins.gpio7,                // DIN (Data Input)
-            None::<esp_idf_svc::hal::gpio::Gpio0>, // MCLK（不使用）
-            peripherals.pins.gpio16,               // WS (Word Select)
+            bclk, // BCLK (Bit Clock)
+            dout, // DIN (Data Input)
+            mclk, // MCLK（不使用）
+            ws,   // WS (Word Select)
         )
         .map_err(|e| {
             error!("❌ 创建 I2sDriver 失败: {:?}", e);
             SpeakerError::from(e)
         })?;
 
+        info!("✅ I2S 音频输出初始化成功");
+
         // 启用 I2S 发送通道
         i2s.tx_enable().map_err(|e| {
             error!("❌ 启用 I2S 发送通道失败: {:?}", e);
             SpeakerError::from(e)
         })?;
+        info!("✅ I2S 音频输出已启用");
 
-        info!("✅ I2S 音频输出初始化成功");
 
         let (sender, receiver) = mpsc::sync_channel::<SoundCommand>(service_config.queue_capacity);
         let stop_signal = Arc::new(AtomicBool::new(false));
@@ -258,9 +250,7 @@ impl From<&str> for PcmFormat {
 
 pub enum SpeakerError {
     Stopped,
-    I2SError(esp_idf_svc::sys::EspError),
-    PeripheralError,
-    NotInitialized,
+    EspError(esp_idf_svc::sys::EspError),
     QueueError(String),
 }
 
@@ -268,9 +258,7 @@ impl std::fmt::Debug for SpeakerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SpeakerError::Stopped => write!(f, "已停止"),
-            SpeakerError::I2SError(e) => write!(f, "I2S错误: {:?}", e),
-            SpeakerError::PeripheralError => write!(f, "外设错误"),
-            SpeakerError::NotInitialized => write!(f, "未初始化"),
+            SpeakerError::EspError(e) => write!(f, "ESP错误: {:?}", e),
             SpeakerError::QueueError(e) => write!(f, "队列错误: {}", e),
         }
     }
@@ -280,9 +268,7 @@ impl std::fmt::Display for SpeakerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SpeakerError::Stopped => write!(f, "已停止"),
-            SpeakerError::I2SError(e) => write!(f, "I2S错误: {:?}", e),
-            SpeakerError::PeripheralError => write!(f, "外设错误"),
-            SpeakerError::NotInitialized => write!(f, "未初始化"),
+            SpeakerError::EspError(e) => write!(f, "I2S错误: {:?}", e),
             SpeakerError::QueueError(e) => write!(f, "队列错误: {}", e),
         }
     }
@@ -292,6 +278,6 @@ impl std::error::Error for SpeakerError {}
 
 impl From<esp_idf_svc::sys::EspError> for SpeakerError {
     fn from(err: esp_idf_svc::sys::EspError) -> Self {
-        SpeakerError::I2SError(err)
+        SpeakerError::EspError(err)
     }
 }

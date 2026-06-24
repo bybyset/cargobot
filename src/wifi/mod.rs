@@ -2,6 +2,9 @@ pub mod manager;
 pub mod resources;
 pub mod softap;
 
+use std::{thread, time::Duration};
+
+use esp_idf_svc::hal::{modem::WifiModemPeripheral};
 use log::info;
 use thiserror::Error;
 
@@ -30,36 +33,42 @@ pub enum WifiError {
 
 pub type Result<T> = std::result::Result<T, WifiError>;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum WifiState {
-    Unconfigured,
-    Configuring,
-    Connecting,
-    Connected,
-    Disconnected,
-    Error,
-}
+
 
 // 等待WiFi连接
 /// 如果WiFi未配置，会进入配网模式。
 /// 如果连接超时，会返回错误。
 /// 如果连接成功，会返回WiFi管理器。
-pub fn wait_for_wifi_connection() -> Result<WifiManager> {
+pub fn wait_for_wifi_connection<M: WifiModemPeripheral + 'static>(modem: M) -> Result<WifiManager> {
     // 启动wifi配置，若未配置则进入配网模式
-    let mut wifi_manager = WifiManager::new()?;
-    wifi_manager.init()?;
+    let mut wifi_manager = WifiManager::new(modem)?;
+    loop {
+        if wifi_manager.is_configured() {
+            info!("✅ 已配置WiFi，尝试连接...");
+        } else {
+            info!("⚠️ 未配置WiFi，将进入配网模式");
+            info!("📱 请按以下步骤操作：");
+            info!("   1. 用手机连接WiFi: XiaoLiang-Setup");
+            info!("   2. 密码: 12345678");
+            info!("   3. 浏览器访问: http://192.168.4.1");
+            info!("   4. 输入您的家庭WiFi信息");
+        }
 
-    if wifi_manager.is_configured() {
-        info!("✅ 已配置WiFi，尝试连接...");
-    } else {
-        info!("⚠️ 未配置WiFi，将进入配网模式");
-        info!("📱 请按以下步骤操作：");
-        info!("   1. 用手机连接WiFi: XiaoLiang-Setup");
-        info!("   2. 密码: 12345678");
-        info!("   3. 浏览器访问: http://192.168.4.1");
-        info!("   4. 输入您的家庭WiFi信息");
+        let connect_result = wifi_manager.ensure_connected();
+        match connect_result {
+            Ok(_) => {
+                break;
+            }
+            Err(e) => {
+                info!("wifi连接失败: {:?}", e);
+                info!("5秒后重试...");
+                let _ = wifi_manager.clear_credentials();
+                thread::sleep(Duration::from_secs(5));
+                continue;
+            }
+        }
+
     }
 
-    wifi_manager.ensure_connected()?;
     Ok(wifi_manager)
 }
